@@ -4,6 +4,8 @@ import digitalio
 import struct
 import time
 import math
+import asyncio
+
 
 import adafruit_ssd1306
 from circuitpython_nrf24l01.rf24 import RF24
@@ -154,7 +156,9 @@ last_display_update = 0
 
 
 
-
+display_fps = 0
+display_frames = 0
+fps_timer = time.monotonic()
 # DISPLAY RENDERING
 # this is for the 128x64 OLED screen i have. 
 def draw_dashboard():
@@ -165,7 +169,9 @@ def draw_dashboard():
         last_packet_time is not None
         and time.monotonic() - last_packet_time < 0.75
     )
-    display.text("Sick ass telemetry", 0, 0, 1)
+    #display.text("Sick ass telemetry", 0, 0, 1)
+    display.text("Telemetry", 0, 0, 1)
+    display.text("FPS:{:.0f}".format(display_fps), 85, 0, 1)
     display.line(0, 9, 127, 9, 1)
 
     # JOYSTICK GRAPH
@@ -237,47 +243,83 @@ draw_dashboard()
 # MAIN RECEIVER LOOP
 
 print("Listening for joystick packets...")
+async def RadioTask():
+    global packet_count
+    global rate_packets
+    global last_packet_time
+    global joystick_x
+    global joystick_y
+    global joystick_button
+    global rate_hz
+    global rate_start
+    while True:
 
-while True:
-    while radio.available():
+        # RECEIVE ALL AVAILABLE PACKETS
+        while radio.available():
+            payload = radio.read()
 
-        payload = radio.read()
+            if payload is None:
+                continue
 
-        if payload is None:
-            continue
+            if len(payload) != 12:
+                print("Invalid packet size:", len(payload))
+                continue
 
-        if len(payload) != 12:
-            print("Invalid packet size:", len(payload))
-            continue
+            # Decode transmitter packet
+            x, y, button = struct.unpack("<ffI", payload)
 
-        # Decode transmitter packet
-        joystick_x, joystick_y, joystick_button = struct.unpack(
-            "<ffI", payload
-        )
+            # Validate coordinates
+            if not math.isfinite(x) or not math.isfinite(y):
+                continue
 
-        # Validate coordinates
-        if not math.isfinite(joystick_x):
-            continue
+            # Update telemetry
+            joystick_x = x
+            joystick_y = y
+            joystick_button = button
 
-        if not math.isfinite(joystick_y):
-            continue
+            packet_count += 1
+            rate_packets += 1
+            last_packet_time = time.monotonic()
 
-        packet_count += 1
-        rate_packets += 1
+        # PACKET RATE CALCULATION
+        now = time.monotonic()
+        elapsed = now - rate_start
 
-        last_packet_time = time.monotonic()
+        if elapsed >= 1.0:
+            rate_hz = rate_packets / elapsed
+            rate_packets = 0
+            rate_start = now
 
-    # PACKET RATE CALCULATION
-    now = time.monotonic()
-    elapsed = now - rate_start
-    if elapsed >= 1.0:
-        rate_hz = rate_packets / elapsed
-        rate_packets = 0
-        rate_start = now
+        # Yield to display task
+        await asyncio.sleep(0.001)
 
 
-    # UPDATE DISPLAY
-    if now - last_display_update >= 0.1:
-        draw_dashboard()
-        last_display_update = now
-    time.sleep(0.001)
+async def ScreenTask():
+    global last_display_update
+    global display_fps, display_frames, fps_timer
+
+    while True:
+        now = time.monotonic()
+
+        if now - last_display_update >= 0.05:
+            draw_dashboard()
+            last_display_update = now
+
+            display_frames += 1
+
+        # Calculate FPS once per second
+        if now - fps_timer >= 1.0:
+            display_fps = display_frames / (now - fps_timer)
+            display_frames = 0
+            fps_timer = now
+
+        await asyncio.sleep(0.001)
+    
+
+async def main():
+    await asyncio.gather(
+        RadioTask(),
+        ScreenTask()
+    )
+
+asyncio.run(main())
